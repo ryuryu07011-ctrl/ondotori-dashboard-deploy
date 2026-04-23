@@ -7,7 +7,7 @@ import streamlit.components.v1 as components
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 st.set_page_config(page_title="温度データ ダッシュボード", layout="wide")
-st.title("📊 おんどとり 温度ダッシュボード")
+st.title("楽温")
 AUTO_REFRESH_SECONDS = 60
 AUTO_REFRESH_DELAY_SECONDS = 10 * 60
 

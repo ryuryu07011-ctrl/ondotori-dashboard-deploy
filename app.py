@@ -11,7 +11,7 @@ st.title("📊 おんどとり 温度ダッシュボード")
 AUTO_REFRESH_SECONDS = 60
 AUTO_REFRESH_DELAY_SECONDS = 10 * 60
 
-URL = "https://api.webstorage.jp/v1/devices/latest-data-rtr500"
+URL = "https://api.webstorage.jp/v1/devices/data-rtr500"
 REQUEST_TIMEOUT = (5, 12)
 MAX_WORKERS = 4
 HEADERS = {
@@ -31,16 +31,22 @@ REMOTE_SERIALS = [
     "528244B2",
     "528244E7",
 ]
-HISTORY_CSV = Path(r"G:\マイドライブ\ondotori_history.csv")
+HISTORY_CSV = Path(".streamlit/ondotori_history.csv")
 
 
-def load_data() -> pd.DataFrame:
+def load_data(start_ts: pd.Timestamp, end_ts: pd.Timestamp) -> pd.DataFrame:
     valid_serials = [s for s in REMOTE_SERIALS if not s.startswith("REMOTE_SERIAL_")]
     if not valid_serials:
         return pd.DataFrame(columns=["time", "temp", "remote_serial"])
 
     def fetch_remote_rows(remote_serial: str) -> list[dict]:
-        payload = {**PAYLOAD, "remote-serial": remote_serial}
+        payload = {
+            **PAYLOAD,
+            "remote-serial": remote_serial,
+            "unixtime-from": int(start_ts.timestamp()),
+            "unixtime-to": int(end_ts.timestamp()),
+            "number": 65535,
+        }
         response = requests.post(URL, headers=HEADERS, json=payload, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         data = response.json()
@@ -133,11 +139,14 @@ def save_history_csv(df: pd.DataFrame) -> None:
 
 try:
     PAYLOAD = load_api_config()
+    now_jst = pd.Timestamp.now(tz="Asia/Tokyo").tz_localize(None)
+    start_ts = pd.Timestamp(year=now_jst.year, month=4, day=15, hour=0, minute=0, second=0)
+    end_ts = now_jst
 
     latest_df = pd.DataFrame(columns=["time", "temp", "remote_serial"])
     fetch_error = None
     try:
-        latest_df = load_data()
+        latest_df = load_data(start_ts=start_ts, end_ts=end_ts)
     except requests.RequestException as e:
         fetch_error = e
 
@@ -145,8 +154,6 @@ try:
     df = pd.concat([history_df, latest_df], ignore_index=True)
     df = df.drop_duplicates(subset=["time", "remote_serial"], keep="last")
     df = df.sort_values(["time", "remote_serial"]).reset_index(drop=True)
-    now_jst = pd.Timestamp.now(tz="Asia/Tokyo").tz_localize(None)
-    start_ts = pd.Timestamp(year=now_jst.year, month=4, day=15, hour=0, minute=0, second=0)
     df = df[df["time"] >= start_ts].copy()
     if len(df) != len(history_df) or not latest_df.empty:
         save_history_csv(df)
@@ -197,7 +204,6 @@ try:
     )
 
     now = now_jst
-    end_ts = now
     st.caption(f"表示期間: {start_ts.strftime('%Y-%m-%d %H:%M')} ～ {end_ts.strftime('%Y-%m-%d %H:%M')}")
 
     filtered = df[(df["time"] >= start_ts) & (df["time"] <= end_ts)].copy()

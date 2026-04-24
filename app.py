@@ -32,6 +32,7 @@ REMOTE_SERIALS = [
     "528244E7",
 ]
 HISTORY_CSV = Path(".streamlit/ondotori_history.csv")
+MAX_CHART_POINTS_PER_SERIAL = 1200
 
 
 def load_data(start_ts: pd.Timestamp, end_ts: pd.Timestamp, from_by_serial: dict[str, pd.Timestamp] | None = None) -> pd.DataFrame:
@@ -141,6 +142,19 @@ def save_history_csv(df: pd.DataFrame) -> None:
     df.to_csv(HISTORY_CSV, index=False, encoding="utf-8-sig")
 
 
+def prepare_chart_df(df: pd.DataFrame) -> pd.DataFrame:
+    # 描画点数を抑えてブラウザ負荷を下げる
+    chunks = []
+    for serial, group in df.groupby("remote_serial", sort=False):
+        if len(group) > MAX_CHART_POINTS_PER_SERIAL:
+            step = max(1, len(group) // MAX_CHART_POINTS_PER_SERIAL)
+            group = group.iloc[::step].copy()
+        chunks.append(group)
+    if not chunks:
+        return df
+    return pd.concat(chunks, ignore_index=True)
+
+
 try:
     PAYLOAD = load_api_config()
     now_jst = pd.Timestamp.now(tz="Asia/Tokyo").tz_localize(None)
@@ -244,8 +258,9 @@ try:
     col2.metric("最低温度", f"{filtered['temp'].min():.1f} ℃")
     col3.metric("平均温度", f"{filtered['temp'].mean():.1f} ℃")
 
+    chart_df = prepare_chart_df(filtered)
     st.subheader("📈 温度推移")
-    chart = alt.Chart(filtered).mark_line(point=True).encode(
+    chart = alt.Chart(chart_df).mark_line().encode(
         x=alt.X("time:T", title="時刻"),
         y=alt.Y("temp:Q", title="温度(℃)", scale=alt.Scale(domain=[33, 42])),
         color=alt.Color("remote_serial:N", title="リモートシリアル"),

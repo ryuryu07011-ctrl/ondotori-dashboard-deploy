@@ -34,18 +34,22 @@ REMOTE_SERIALS = [
 HISTORY_CSV = Path(".streamlit/ondotori_history.csv")
 
 
-def load_data(start_ts: pd.Timestamp, end_ts: pd.Timestamp) -> pd.DataFrame:
+def load_data(start_ts: pd.Timestamp, end_ts: pd.Timestamp, from_by_serial: dict[str, pd.Timestamp] | None = None) -> pd.DataFrame:
     valid_serials = [s for s in REMOTE_SERIALS if not s.startswith("REMOTE_SERIAL_")]
     if not valid_serials:
         return pd.DataFrame(columns=["time", "temp", "remote_serial"])
 
     def fetch_remote_rows(remote_serial: str) -> list[dict]:
+        fetch_from = start_ts
+        if from_by_serial and remote_serial in from_by_serial:
+            fetch_from = from_by_serial[remote_serial]
+        number = 65535 if fetch_from == start_ts else 5000
         payload = {
             **PAYLOAD,
             "remote-serial": remote_serial,
-            "unixtime-from": int(start_ts.timestamp()),
+            "unixtime-from": int(fetch_from.timestamp()),
             "unixtime-to": int(end_ts.timestamp()),
-            "number": 65535,
+            "number": number,
         }
         response = requests.post(URL, headers=HEADERS, json=payload, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
@@ -142,15 +146,22 @@ try:
     now_jst = pd.Timestamp.now(tz="Asia/Tokyo").tz_localize(None)
     start_ts = pd.Timestamp(year=now_jst.year, month=4, day=15, hour=0, minute=0, second=0)
     end_ts = now_jst
+    history_df = load_history_csv()
+    history_df = history_df[history_df["time"] >= start_ts].copy()
+
+    from_by_serial: dict[str, pd.Timestamp] = {}
+    if not history_df.empty:
+        for serial, max_time in history_df.groupby("remote_serial")["time"].max().items():
+            # 少し戻して取得し、欠損を防ぎながら差分更新する
+            from_by_serial[str(serial)] = max(start_ts, max_time - pd.Timedelta(hours=1))
 
     latest_df = pd.DataFrame(columns=["time", "temp", "remote_serial"])
     fetch_error = None
     try:
-        latest_df = load_data(start_ts=start_ts, end_ts=end_ts)
+        latest_df = load_data(start_ts=start_ts, end_ts=end_ts, from_by_serial=from_by_serial)
     except requests.RequestException as e:
         fetch_error = e
 
-    history_df = load_history_csv()
     df = pd.concat([history_df, latest_df], ignore_index=True)
     df = df.drop_duplicates(subset=["time", "remote_serial"], keep="last")
     df = df.sort_values(["time", "remote_serial"]).reset_index(drop=True)

@@ -6,6 +6,13 @@ from pathlib import Path
 import streamlit.components.v1 as components
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+DEFAULT_REMOTE_SERIALS = [
+    "52824458",
+    "5282445B",
+    "528244B2",
+    "528244E7",
+]
+
 st.set_page_config(page_title="温度データ ダッシュボード", layout="wide")
 st.title("楽温　ダッシュボード")
 st.markdown(
@@ -45,9 +52,19 @@ def _safe_get_secret_block():
 
 
 secret_block_defaults = _safe_get_secret_block()
+if "manual_remote_serials" not in st.session_state:
+    st.session_state["manual_remote_serials"] = DEFAULT_REMOTE_SERIALS.copy()
 with st.sidebar:
     st.markdown("### API設定（上書き）")
     st.warning("入力した値はAPI通信に使います。表示内容やログには十分注意してください。", icon="⚠️")
+    if st.button("元データを選択（初期値に戻す）", width="stretch"):
+        st.session_state["manual_api_override"] = True
+        st.session_state["manual_api_key"] = str(secret_block_defaults.get("api_key", ""))
+        st.session_state["manual_login_id"] = str(secret_block_defaults.get("login_id", ""))
+        st.session_state["manual_login_pass"] = str(secret_block_defaults.get("login_pass", ""))
+        st.session_state["manual_base_serial"] = str(secret_block_defaults.get("base_serial", ""))
+        st.session_state["manual_remote_serials"] = DEFAULT_REMOTE_SERIALS.copy()
+        st.rerun()
     manual_api_override = st.checkbox("手動入力で上書き", value=False, key="manual_api_override")
     manual_api_key = st.text_input(
         "APIキー",
@@ -75,6 +92,21 @@ with st.sidebar:
         key="manual_base_serial",
         disabled=not manual_api_override,
     )
+    serial_candidates = sorted(set(DEFAULT_REMOTE_SERIALS + st.session_state.get("manual_remote_serials", [])))
+    st.multiselect(
+        "子機シリアル選択（複数）",
+        options=serial_candidates,
+        default=st.session_state.get("manual_remote_serials", DEFAULT_REMOTE_SERIALS),
+        key="manual_remote_serials",
+        disabled=not manual_api_override,
+    )
+    manual_extra_serials = st.text_input(
+        "子機シリアル追加入力（カンマ区切り）",
+        value="",
+        key="manual_extra_serials",
+        disabled=not manual_api_override,
+        placeholder="例: 52824458,5282445B",
+    )
 AUTO_REFRESH_SECONDS = 60
 AUTO_REFRESH_DELAY_SECONDS = 10 * 60
 
@@ -92,12 +124,7 @@ PAYLOAD = {
     "base-serial": "",
 }
 # ここに取得したい子機のリモートシリアルを追加（例: 3台）
-REMOTE_SERIALS = [
-    "52824458",
-    "5282445B",
-    "528244B2",
-    "528244E7",
-]
+REMOTE_SERIALS = DEFAULT_REMOTE_SERIALS.copy()
 SERIAL_TO_CHILD = {serial: f"子機{idx + 1}" for idx, serial in enumerate(REMOTE_SERIALS)}
 VALID_SERIALS = set(REMOTE_SERIALS)
 HISTORY_CSV = Path(".streamlit/ondotori_history.csv")
@@ -421,6 +448,22 @@ def analyze_weekly_deviation(df: pd.DataFrame, end_ts: pd.Timestamp) -> pd.DataF
 
 
 try:
+    if st.session_state.get("manual_api_override", False):
+        selected_serials = [str(s).strip() for s in st.session_state.get("manual_remote_serials", []) if str(s).strip()]
+        extra_serials_raw = str(st.session_state.get("manual_extra_serials", "")).strip()
+        if extra_serials_raw:
+            selected_serials.extend([s.strip() for s in extra_serials_raw.split(",") if s.strip()])
+        selected_serials = list(dict.fromkeys(selected_serials))
+        if selected_serials:
+            REMOTE_SERIALS = selected_serials
+        else:
+            REMOTE_SERIALS = DEFAULT_REMOTE_SERIALS.copy()
+    else:
+        REMOTE_SERIALS = DEFAULT_REMOTE_SERIALS.copy()
+
+    SERIAL_TO_CHILD = {serial: f"子機{idx + 1}" for idx, serial in enumerate(REMOTE_SERIALS)}
+    VALID_SERIALS = set(REMOTE_SERIALS)
+
     PAYLOAD = load_api_config()
     now_jst = pd.Timestamp.now(tz="Asia/Tokyo").tz_localize(None)
     start_ts = pd.Timestamp(year=now_jst.year, month=4, day=15, hour=0, minute=0, second=0)

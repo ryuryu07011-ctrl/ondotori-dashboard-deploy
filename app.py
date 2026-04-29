@@ -36,6 +36,45 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+def _safe_get_secret_block():
+    try:
+        return st.secrets.get("ondotori", {})
+    except Exception:
+        return {}
+
+
+secret_block_defaults = _safe_get_secret_block()
+with st.sidebar:
+    st.markdown("### API設定（上書き）")
+    st.warning("入力した値はAPI通信に使います。表示内容やログには十分注意してください。", icon="⚠️")
+    manual_api_override = st.checkbox("手動入力で上書き", value=False, key="manual_api_override")
+    manual_api_key = st.text_input(
+        "APIキー",
+        value=str(secret_block_defaults.get("api_key", "")),
+        type="password",
+        key="manual_api_key",
+        disabled=not manual_api_override,
+    )
+    manual_login_id = st.text_input(
+        "ID",
+        value=str(secret_block_defaults.get("login_id", "")),
+        key="manual_login_id",
+        disabled=not manual_api_override,
+    )
+    manual_login_pass = st.text_input(
+        "パスワード",
+        value=str(secret_block_defaults.get("login_pass", "")),
+        type="password",
+        key="manual_login_pass",
+        disabled=not manual_api_override,
+    )
+    manual_base_serial = st.text_input(
+        "ベースシリアル",
+        value=str(secret_block_defaults.get("base_serial", "")),
+        key="manual_base_serial",
+        disabled=not manual_api_override,
+    )
 AUTO_REFRESH_SECONDS = 60
 AUTO_REFRESH_DELAY_SECONDS = 10 * 60
 
@@ -141,20 +180,28 @@ def load_api_config() -> dict:
     required_keys = ["api-key", "login-id", "login-pass", "base-serial"]
     cfg = PAYLOAD.copy()
 
-    secret_block = st.secrets.get("ondotori", {})
-    secret_key_map = {
-        "api-key": "api_key",
-        "login-id": "login_id",
-        "login-pass": "login_pass",
-        "base-serial": "base_serial",
-    }
-    for payload_key, secret_key in secret_key_map.items():
-        value = secret_block.get(secret_key)
-        if isinstance(value, str) and value.strip():
-            cfg[payload_key] = value.strip()
+    if st.session_state.get("manual_api_override", False):
+        cfg["api-key"] = str(st.session_state.get("manual_api_key", "")).strip()
+        cfg["login-id"] = str(st.session_state.get("manual_login_id", "")).strip()
+        cfg["login-pass"] = str(st.session_state.get("manual_login_pass", "")).strip()
+        cfg["base-serial"] = str(st.session_state.get("manual_base_serial", "")).strip()
+    else:
+        secret_block = _safe_get_secret_block()
+        secret_key_map = {
+            "api-key": "api_key",
+            "login-id": "login_id",
+            "login-pass": "login_pass",
+            "base-serial": "base_serial",
+        }
+        for payload_key, secret_key in secret_key_map.items():
+            value = secret_block.get(secret_key)
+            if isinstance(value, str) and value.strip():
+                cfg[payload_key] = value.strip()
 
     missing = [k for k in required_keys if not cfg.get(k)]
     if missing:
+        if st.session_state.get("manual_api_override", False):
+            raise ValueError("手動入力のAPI設定が未入力です。APIキー/ID/パスワード/ベースシリアルを入力してください。")
         raise ValueError(
             "secrets が未設定です。.streamlit/secrets.toml の [ondotori] に "
             "api_key, login_id, login_pass, base_serial を設定してください。"

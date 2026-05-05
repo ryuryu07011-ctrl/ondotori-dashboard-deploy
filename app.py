@@ -5,6 +5,10 @@ import altair as alt
 from pathlib import Path
 import streamlit.components.v1 as components
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
+import shutil
+import tempfile
+import hashlib
 
 DEFAULT_REMOTE_SERIALS = [
     "52824458",
@@ -127,7 +131,8 @@ PAYLOAD = {
 REMOTE_SERIALS = DEFAULT_REMOTE_SERIALS.copy()
 SERIAL_TO_CHILD = {serial: f"子機{idx + 1}" for idx, serial in enumerate(REMOTE_SERIALS)}
 VALID_SERIALS = set(REMOTE_SERIALS)
-HISTORY_CSV = Path(".streamlit/ondotori_history.csv")
+LEGACY_HISTORY_CSV = Path(".streamlit/ondotori_history.csv")
+HISTORY_CSV = LEGACY_HISTORY_CSV  # 実行時に resolve_history_csv の結果で上書き
 MAX_CHART_POINTS_PER_SERIAL = 1200
 DROP_THRESHOLD_C = 0.8
 FEEDING_WINDOWS = [(8, 30, 9, 30), (15, 30, 16, 30)]
@@ -138,6 +143,7 @@ STALE_LOOKBACK_HOURS = 24
 WEEK_ANOMALY_ZSCORE = 2.0
 WEEK_ANOMALY_DELTA_C = 1.5
 TRANSIENT_DROP_WINDOW_MIN = 10
+TEMP_EXCLUDE_C = 35.0
 
 
 def load_data(start_ts: pd.Timestamp, end_ts: pd.Timestamp, from_by_serial: dict[str, pd.Timestamp] | None = None) -> pd.DataFrame:
@@ -236,8 +242,40 @@ def load_api_config() -> dict:
     return cfg
 
 
+def _short_hash(*parts: str) -> str:
+    joined = "|".join(parts)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:12]
+
+
+def _safe_path_exists(path: Path) -> bool:
+    """存在確認自体が OSError になる環境（切断ドライブ等）を吸収する。"""
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
+def resolve_history_csv(cfg: dict) -> Path:
+    """
+    Streamlit Cloud / ローカル双方で書き込み可能な場所に履歴CSVを置く。
+    顧客ごとに混ざらないよう login-id / api-key を短いハッシュに畳んで分離する。
+    """
+    login_id = str(cfg.get("login-id", "")).strip()
+    api_key = str(cfg.get("api-key", "")).strip()
+    login_part = _short_hash("login", login_id) if login_id else "nologin"
+    key_part = _short_hash("key", api_key) if api_key else "nokey"
+
+    if os.name == "nt":
+        cache_root = Path(os.environ.get("LOCALAPPDATA") or Path.home())
+    else:
+        cache_root = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
+    history_dir = cache_root / "ondotori_dashboard_history"
+    history_dir.mkdir(parents=True, exist_ok=True)
+    return history_dir / f"ondotori_history_{login_part}_{key_part}.csv"
+
+
 def load_history_csv() -> pd.DataFrame:
-    if not HISTORY_CSV.exists():
+    if not _safe_path_exists(HISTORY_CSV):
         return pd.DataFrame(columns=["time", "temp", "remote_serial"])
 
     history = pd.read_csv(HISTORY_CSV, dtype={"remote_serial": str})
@@ -252,10 +290,18 @@ def load_history_csv() -> pd.DataFrame:
 
 
 def save_history_csv(df: pd.DataFrame) -> None:
-    HISTORY_CSV.parent.mkdir(parents=True, exist_ok=True)
+    global HISTORY_CSV
     out = df.copy()
     out["remote_serial"] = out["remote_serial"].astype(str).str.strip()
-    out.to_csv(HISTORY_CSV, index=False, encoding="utf-8-sig")
+    try:
+        HISTORY_CSV.parent.mkdir(parents=True, exist_ok=True)
+        out.to_csv(HISTORY_CSV, index=False, encoding="utf-8-sig")
+    except OSError:
+        fallback = Path(tempfile.gettempdir()) / "ondotori_dashboard_history"
+        fallback.mkdir(parents=True, exist_ok=True)
+        HISTORY_CSV = fallback / HISTORY_CSV.name
+        HISTORY_CSV.parent.mkdir(parents=True, exist_ok=True)
+        out.to_csv(HISTORY_CSV, index=False, encoding="utf-8-sig")
 
 
 def normalize_sensor_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -268,6 +314,7 @@ def normalize_sensor_df(df: pd.DataFrame) -> pd.DataFrame:
     out["temp"] = pd.to_numeric(out["temp"], errors="coerce")
     out["remote_serial"] = out["remote_serial"].astype(str).str.strip()
     out = out.dropna(subset=["time", "temp", "remote_serial"])
+    out = out[out["temp"] > TEMP_EXCLUDE_C]
     out = out[out["remote_serial"].isin(VALID_SERIALS)]
     return out.sort_values(["time", "remote_serial"]).reset_index(drop=True)
 
@@ -465,6 +512,15 @@ try:
     VALID_SERIALS = set(REMOTE_SERIALS)
 
     PAYLOAD = load_api_config()
+    resolved_history = resolve_history_csv(PAYLOAD)
+    if not _safe_path_exists(resolved_history) and _safe_path_exists(LEGACY_HISTORY_CSV):
+        try:
+            resolved_history.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(LEGACY_HISTORY_CSV, resolved_history)
+        except OSError:
+            pass
+    HISTORY_CSV = resolved_history
+
     now_jst = pd.Timestamp.now(tz="Asia/Tokyo").tz_localize(None)
     start_ts = pd.Timestamp(year=now_jst.year, month=4, day=15, hour=0, minute=0, second=0)
     end_ts = now_jst
@@ -501,7 +557,7 @@ try:
     st.sidebar.header("⚙️ 設定")
     if st.sidebar.button("🔄 グラフ更新", width="stretch"):
         st.rerun()
-    st.sidebar.caption(f"保存先: {HISTORY_CSV}")
+    st.sidebar.caption(f"保存先: {HISTORY_CSV.resolve()}")
     if fetch_error:
         st.sidebar.warning("最新データ取得に失敗したため、保存済みデータで表示中です。")
     else:
@@ -547,6 +603,7 @@ try:
         st.stop()
 
     raw_period_df = normalize_sensor_df(raw_period_df)
+    raw_period_df = raw_period_df[raw_period_df["temp"] > TEMP_EXCLUDE_C].copy()
 
     filtered = raw_period_df.set_index("time")
     if avg_mode == "5分平均":
@@ -559,6 +616,7 @@ try:
         filtered = filtered.groupby("remote_serial").resample("1h").mean(numeric_only=True)
 
     filtered = filtered.dropna().reset_index()
+    filtered = filtered[filtered["temp"] > TEMP_EXCLUDE_C].copy()
     if filtered.empty:
         st.warning("平均化後のデータがありません。")
         st.stop()
@@ -571,6 +629,7 @@ try:
     with analysis_col1:
         stats_24h_df = raw_period_df[raw_period_df["time"] >= (end_ts - pd.Timedelta(hours=24))].copy()
         stats_24h_df = remove_transient_drops(stats_24h_df)
+        stats_24h_df = stats_24h_df[stats_24h_df["temp"] > TEMP_EXCLUDE_C].copy()
         stats_24h_df["子機番号"] = stats_24h_df["remote_serial"].apply(child_label)
         serial_stats = (
             stats_24h_df.groupby("子機番号")["temp"]
@@ -605,6 +664,7 @@ try:
             .dropna()
             .reset_index()
         )
+        trend_df = trend_df[trend_df["temp"] > TEMP_EXCLUDE_C].copy()
         trend_df["子機番号"] = trend_df["remote_serial"].apply(child_label)
         st.caption("温度推移（30分平均・2日表示）")
         if trend_df.empty:
@@ -685,6 +745,7 @@ try:
         .dropna()
         .reset_index()
     )
+    chart_series = chart_series[chart_series["temp"] > TEMP_EXCLUDE_C].copy()
     chart_series["子機番号"] = chart_series["remote_serial"].apply(child_label)
     chart_df = prepare_chart_df(chart_series)
     st.subheader("📈 温度推移（30分平均）")
